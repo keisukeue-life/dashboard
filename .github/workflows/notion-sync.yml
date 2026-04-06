@@ -17,9 +17,6 @@ jobs:
           script: |
             const issue = context.payload.issue;
             const org = context.repo.owner;
-            const repo = context.repo.repo;
-            const action = context.payload.action;
-
             const notionToken = process.env.NOTION_TOKEN;
             const databaseId = process.env.NOTION_DATABASE_ID;
 
@@ -28,7 +25,41 @@ jobs:
               return;
             }
 
-            // Search for existing page with this GitHub URL
+            // First, get database schema to know property names
+            const dbRes = await fetch(`https://api.notion.com/v1/databases/${databaseId}`, {
+              headers: {
+                'Authorization': `Bearer ${notionToken}`,
+                'Notion-Version': '2022-06-28'
+              }
+            });
+            const dbData = await dbRes.json();
+            const props = dbData.properties || {};
+
+            // Find the title property name (could be "Name", "名前", "Title", etc.)
+            let titleProp = 'Name';
+            for (const [key, val] of Object.entries(props)) {
+              if (val.type === 'title') { titleProp = key; break; }
+            }
+
+            // Find or note which properties exist
+            const hasStatus = 'Status' in props || 'ステータス' in props;
+            const statusKey = 'Status' in props ? 'Status' : 'ステータス' in props ? 'ステータス' : null;
+
+            // Build properties using only the title (guaranteed to exist)
+            const properties = {};
+            properties[titleProp] = {
+              title: [{ text: { content: `[${org}] ${issue.title}` } }]
+            };
+
+            // Add status if it exists
+            if (statusKey) {
+              let status = 'Not started';
+              if (issue.state === 'closed') status = 'Done';
+              else if (issue.labels && issue.labels.some(l => l.name === 'in-progress')) status = 'In progress';
+              properties[statusKey] = { status: { name: status } };
+            }
+
+            // Search for existing page
             const searchRes = await fetch(`https://api.notion.com/v1/databases/${databaseId}/query`, {
               method: 'POST',
               headers: {
@@ -38,42 +69,61 @@ jobs:
               },
               body: JSON.stringify({
                 filter: {
-                  property: 'GitHub URL',
-                  url: { equals: issue.html_url }
+                  property: titleProp,
+                  title: { contains: issue.html_url }
                 }
               })
             });
-
             const searchData = await searchRes.json();
             const existingPage = searchData.results && searchData.results.length > 0
               ? searchData.results[0] : null;
 
-            // Determine status
-            let status = 'brainstorming';
-            if (issue.state === 'closed') status = 'Done';
-            else if (issue.labels && issue.labels.some(l => l.name === 'in-progress')) status = 'In progress';
-
-            // Build properties
-            const properties = {
-              'Name': {
-                title: [{ text: { content: issue.title } }]
+            // Build page content with issue details
+            const children = [
+              {
+                object: 'block',
+                type: 'heading_2',
+                heading_2: {
+                  rich_text: [{ text: { content: 'Details' } }]
+                }
               },
-              'Organization': {
-                select: { name: org }
+              {
+                object: 'block',
+                type: 'paragraph',
+                paragraph: {
+                  rich_text: [{ text: { content: `Organization: ${org}` } }]
+                }
               },
-              'Status': {
-                status: { name: status }
+              {
+                object: 'block',
+                type: 'paragraph',
+                paragraph: {
+                  rich_text: [
+                    { text: { content: 'GitHub: ' } },
+                    { text: { content: issue.html_url, link: { url: issue.html_url } } }
+                  ]
+                }
               },
-              'GitHub URL': {
-                url: issue.html_url
-              },
-              'Labels': {
-                multi_select: (issue.labels || []).map(l => ({ name: l.name }))
+              {
+                object: 'block',
+                type: 'paragraph',
+                paragraph: {
+                  rich_text: [{ text: { content: issue.body || '(No description)' } }]
+                }
               }
-            };
+            ];
+
+            if (issue.labels && issue.labels.length > 0) {
+              children.push({
+                object: 'block',
+                type: 'paragraph',
+                paragraph: {
+                  rich_text: [{ text: { content: `Labels: ${issue.labels.map(l => l.name).join(', ')}` } }]
+                }
+              });
+            }
 
             if (existingPage) {
-              // Update existing page
               const updateRes = await fetch(`https://api.notion.com/v1/pages/${existingPage.id}`, {
                 method: 'PATCH',
                 headers: {
@@ -83,10 +133,8 @@ jobs:
                 },
                 body: JSON.stringify({ properties })
               });
-              const updateData = await updateRes.json();
               console.log(`Updated Notion page for: ${issue.title}`);
             } else {
-              // Create new page
               const createRes = await fetch(`https://api.notion.com/v1/pages`, {
                 method: 'POST',
                 headers: {
@@ -97,15 +145,7 @@ jobs:
                 body: JSON.stringify({
                   parent: { database_id: databaseId },
                   properties,
-                  children: [
-                    {
-                      object: 'block',
-                      type: 'paragraph',
-                      paragraph: {
-                        rich_text: [{ text: { content: issue.body || '(No description)' } }]
-                      }
-                    }
-                  ]
+                  children
                 })
               });
               const createData = await createRes.json();
