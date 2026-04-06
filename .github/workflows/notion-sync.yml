@@ -12,7 +12,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_API_TOKEN }}
-          NOTION_DATABASE_ID: "13d361e14d078091acacd4c89217b94a"
+          NOTION_DATABASE_ID: "33a361e14d07807b836cc1eaf763f4f2"
         with:
           script: |
             const issue = context.payload.issue;
